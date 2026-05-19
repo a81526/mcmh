@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>錢來我家</title>
 <link rel="apple-touch-icon" href="icon.png">
 <link rel="icon" type="image/png" href="icon.png">
@@ -28,7 +28,20 @@
 html,body{height:100%}
 body{font-family:-apple-system,'Inter','Noto Sans TC',BlinkMacSystemFont,sans-serif;background:var(--bg);color:var(--t1);max-width:430px;margin:0 auto;min-height:100vh;-webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent;overflow-x:hidden}
 /* Wrapper clips any overflow from slide-in pages */
-html{overflow:hidden;height:100%}
+html{overflow:hidden;height:100%;touch-action:manipulation;}
+/* Prevent iOS double-tap zoom */
+*{touch-action:manipulation;}
+/* Ensure safe area is respected at the body level */
+body::before{
+  content:'';
+  display:block;
+  height:env(safe-area-inset-top);
+  background:var(--bg);
+  position:fixed;
+  top:0;left:0;right:0;
+  z-index:999;
+  pointer-events:none;
+}
 
 /* ═══ LOADING ═══ */
 #loading-screen{position:fixed;inset:0;z-index:999;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;}
@@ -116,7 +129,14 @@ html{overflow:hidden;height:100%}
 }
 
 /* ═══ HEADER ═══ */
-.top-header{padding:calc(16px + env(safe-area-inset-top)) 24px 0;display:flex;align-items:center;justify-content:space-between;}
+.top-header{
+  padding:calc(16px + env(safe-area-inset-top)) 24px 12px;
+  display:flex;align-items:center;justify-content:space-between;
+  position:sticky;
+  top:0;
+  z-index:50;
+  background:var(--bg);
+}
 .app-wordmark{font-size:15px;font-weight:600;color:var(--t2);letter-spacing:.2px;}
 .sync-pill{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--t3);}
 .sync-dot{width:6px;height:6px;border-radius:50%;background:var(--sage);flex-shrink:0;}
