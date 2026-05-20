@@ -992,11 +992,29 @@ onAuthStateChanged(auth, async (user) => {
   if (user) {
     await loadFromCloud(user.uid);
     showApp(user);
+
+    // Auto cloud save every 60s
     clearInterval(window._autoSave);
     window._autoSave = setInterval(()=>window._cloudSave(), 60000);
+
+    // Auto price refresh: on login + every 5 minutes
+    clearInterval(window._autoPriceRefresh);
+    // Small delay so UI renders first
+    setTimeout(()=>{
+      if(window.DB.stocks && window.DB.stocks.length > 0){
+        window.refreshAllPrices && window.refreshAllPrices(true); // silent mode
+      }
+    }, 2000);
+    window._autoPriceRefresh = setInterval(()=>{
+      if(window.DB.stocks && window.DB.stocks.length > 0){
+        window.refreshAllPrices && window.refreshAllPrices(true); // silent mode
+      }
+    }, 5 * 60 * 1000); // every 5 minutes
+
   } else {
     window.DB = { monthly:[],budgets:[],debts:[],stocks:[],accounts:[],emergency:{current:0,target:0},settings:{dark:false},nwHistory:[] };
     document.body.classList.remove('dark');
+    clearInterval(window._autoPriceRefresh);
     showAuth();
   }
 });
@@ -1128,24 +1146,68 @@ const mockStockDB = {
 };
 
 // ── API Placeholder (replace with real API) ────────────
-async function lookupStockInfo(symbol, market) {
-  // Real API: Yahoo Finance / Alpha Vantage / Twelve Data / Finnhub
+// ── Yahoo Finance via allorigins proxy (bypasses CORS) ──────
+const PROXY = 'https://api.allorigins.win/raw?url=';
+
+function yahooSymbol(symbol, market) {
   const s = symbol.toUpperCase();
+  // Taiwan stocks: append .TW (ETFs like 00878 also use .TW)
+  if (market === 'TW') return encodeURIComponent(s + '.TW');
+  // US stocks: use as-is
+  return encodeURIComponent(s);
+}
+
+async function yahooFetch(symbol, market) {
+  const ySym = yahooSymbol(symbol, market);
+  const url = `${PROXY}https://query1.finance.yahoo.com/v8/finance/chart/${ySym}?interval=1d&range=2d`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const result = data?.chart?.result?.[0];
+    if (!result) throw new Error('No data');
+    const meta = result.meta;
+    const price     = meta.regularMarketPrice;
+    const prevClose = meta.chartPreviousClose || meta.previousClose || price;
+    const change    = price - prevClose;
+    const changePct = prevClose > 0 ? (change / prevClose * 100) : 0;
+    const name      = meta.longName || meta.shortName || symbol;
+    const currency  = meta.currency || (market === 'TW' ? 'TWD' : 'USD');
+    return { price, prevClose, change, changePct, name, currency };
+  } catch(e) {
+    console.warn(`Yahoo fetch failed for ${symbol}:`, e.message);
+    return null;
+  }
+}
+
+async function lookupStockInfo(symbol, market) {
+  const s = symbol.toUpperCase();
+  // Try Yahoo first
+  const guessMarket = market || (s.match(/^\d|^00/) ? 'TW' : 'US');
+  const live = await yahooFetch(s, guessMarket);
+  if (live) {
+    return {
+      name: live.name,
+      market: guessMarket,
+      currency: live.currency,
+      price: live.price
+    };
+  }
+  // Fallback to mock DB
   return mockStockDB[s] || null;
 }
 
 async function fetchLatestPrice(symbol, market) {
-  // Real API: Yahoo Finance / Alpha Vantage / Twelve Data / Finnhub
+  const live = await yahooFetch(symbol, market);
+  if (live) return live;
+  // Fallback: mock simulation if Yahoo fails
   const s = symbol.toUpperCase();
   const base = mockStockDB[s];
   if (!base) return null;
-  // Simulate small price movement (±1.5%)
   const change = (Math.random() - 0.48) * 0.015;
   const newPrice = Math.round(base.price * (1 + change) * 100) / 100;
-  // Simulate daily change
-  const dayChange = (Math.random() - 0.45) * 0.02;
-  const prevClose = Math.round(base.price * 100) / 100;
-  return { price: newPrice, prevClose, change: newPrice - prevClose, changePct: dayChange * 100 };
+  const prevClose = base.price;
+  return { price: newPrice, prevClose, change: newPrice - prevClose, changePct: change * 100 };
 }
 
 // ─── Stock Calculations ──────────────────────────────────
@@ -1584,24 +1646,52 @@ function deleteTx(stockId, txId){
 }
 
 // ─── Price refresh ────────────────────────────────────────
-async function refreshAllPrices(){
+async function refreshAllPrices(silent=false){
   const btn=document.getElementById('refresh-btn');
-  btn.innerHTML='<svg width="13" height="13" style="color:white"><use href="#i-refresh"/></svg> 更新中…';
+  if(!silent){
+    btn.innerHTML='<svg width="13" height="13" style="color:white"><use href="#i-refresh"/></svg> 更新中…';
+    btn.style.opacity='0.7';
+  }
+
+  let successCount = 0;
+  let failCount = 0;
 
   for(const stock of window.DB.stocks){
     const result = await fetchLatestPrice(stock.symbol, stock.market);
     if(result){
-      stock.prevClose = result.prevClose;
-      stock.price     = result.price;
-      stock.dayChange = result.change;
+      stock.prevClose    = result.prevClose;
+      stock.price        = result.price;
+      stock.dayChange    = result.change;
       stock.dayChangePct = result.changePct;
+      successCount++;
+    } else {
+      failCount++;
     }
   }
 
   window.DB.lastPriceUpdate = new Date().toLocaleTimeString('zh-TW');
-  save(); renderAll(); toast('股價已更新（模擬）');
-  btn.innerHTML='<svg width="13" height="13" style="color:white"><use href="#i-refresh"/></svg> 更新股價';
+  save(); renderAll();
+
+  if(!silent){
+    if(failCount === 0 && successCount > 0){
+      toast(`✓ 股價已更新（${successCount} 檔）`);
+    } else if(successCount > 0){
+      toast(`部分更新：${successCount} 成功，${failCount} 失敗`);
+    } else {
+      toast('⚠ 無法取得即時股價，請檢查網路');
+    }
+    btn.innerHTML='<svg width="13" height="13" style="color:white"><use href="#i-refresh"/></svg> 更新股價';
+    btn.style.opacity='1';
+  } else {
+    // Silent: just update the button timestamp display
+    const timeEl = document.getElementById('iv-time');
+    if(timeEl) timeEl.textContent = window.DB.lastPriceUpdate;
+    btn.innerHTML='<svg width="13" height="13" style="color:white"><use href="#i-refresh"/></svg> 更新股價';
+    btn.style.opacity='1';
+  }
 }
+// Expose for auto-refresh interval
+window.refreshAllPrices = refreshAllPrices;
 
 // ─── NW History ───────────────────────────────────────────
 function updateNwHistory(){
