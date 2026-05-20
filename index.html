@@ -1146,68 +1146,91 @@ const mockStockDB = {
 };
 
 // ── API Placeholder (replace with real API) ────────────
-// ── Yahoo Finance via allorigins proxy (bypasses CORS) ──────
-const PROXY = 'https://api.allorigins.win/raw?url=';
+// ── Yahoo Finance via multiple CORS proxies ──────────────
+const PROXIES = [
+  'https://api.allorigins.win/raw?url=',
+  'https://api.codetabs.com/v1/proxy?quest=',
+  'https://corsproxy.io/?',
+];
 
-function yahooSymbol(symbol, market) {
+// Taiwan stocks: most listed on TWSE use .TW, OTC use .TWO
+// Try .TW first, fallback to .TWO for ETFs/OTC
+function yahooSymbols(symbol, market) {
   const s = symbol.toUpperCase();
-  // Taiwan stocks: append .TW (ETFs like 00878 also use .TW)
-  if (market === 'TW') return encodeURIComponent(s + '.TW');
-  // US stocks: use as-is
-  return encodeURIComponent(s);
+  if (market === 'TW') {
+    return [
+      encodeURIComponent(s + '.TW'),   // TWSE listed
+      encodeURIComponent(s + '.TWO'),  // OTC/TPEx listed
+    ];
+  }
+  return [encodeURIComponent(s)]; // US stocks
+}
+
+async function yahooFetchOne(encodedSym, proxyUrl) {
+  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodedSym}?interval=1d&range=2d`;
+  const url = proxyUrl + yahooUrl;
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(7000),
+    headers: { 'Accept': 'application/json' }
+  });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const data = await res.json();
+  const result = data?.chart?.result?.[0];
+  if (!result) throw new Error('No chart result');
+  const meta = result.meta;
+  if (!meta.regularMarketPrice) throw new Error('No price');
+  return {
+    price:     meta.regularMarketPrice,
+    prevClose: meta.chartPreviousClose || meta.regularMarketPreviousClose || meta.regularMarketPrice,
+    change:    meta.regularMarketPrice - (meta.chartPreviousClose || meta.regularMarketPrice),
+    changePct: meta.regularMarketChangePercent || 0,
+    name:      meta.longName || meta.shortName || '',
+    currency:  meta.currency || 'TWD',
+  };
 }
 
 async function yahooFetch(symbol, market) {
-  const ySym = yahooSymbol(symbol, market);
-  const url = `${PROXY}https://query1.finance.yahoo.com/v8/finance/chart/${ySym}?interval=1d&range=2d`;
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const data = await res.json();
-    const result = data?.chart?.result?.[0];
-    if (!result) throw new Error('No data');
-    const meta = result.meta;
-    const price     = meta.regularMarketPrice;
-    const prevClose = meta.chartPreviousClose || meta.previousClose || price;
-    const change    = price - prevClose;
-    const changePct = prevClose > 0 ? (change / prevClose * 100) : 0;
-    const name      = meta.longName || meta.shortName || symbol;
-    const currency  = meta.currency || (market === 'TW' ? 'TWD' : 'USD');
-    return { price, prevClose, change, changePct, name, currency };
-  } catch(e) {
-    console.warn(`Yahoo fetch failed for ${symbol}:`, e.message);
-    return null;
+  const syms = yahooSymbols(symbol, market);
+  // Try each symbol suffix × each proxy until one succeeds
+  for (const sym of syms) {
+    for (const proxy of PROXIES) {
+      try {
+        const result = await yahooFetchOne(sym, proxy);
+        console.log(`✓ ${symbol} via proxy ${proxy.slice(0,30)}`);
+        return result;
+      } catch(e) {
+        console.warn(`✗ ${symbol} (${sym}) via ${proxy.slice(0,30)}: ${e.message}`);
+      }
+    }
   }
+  return null; // all failed
 }
 
 async function lookupStockInfo(symbol, market) {
   const s = symbol.toUpperCase();
-  // Try Yahoo first
-  const guessMarket = market || (s.match(/^\d|^00/) ? 'TW' : 'US');
+  const guessMarket = market || (s.match(/^\d/) ? 'TW' : 'US');
   const live = await yahooFetch(s, guessMarket);
   if (live) {
     return {
-      name: live.name,
-      market: guessMarket,
+      name:     live.name || mockStockDB[s]?.name || s,
+      market:   guessMarket,
       currency: live.currency,
-      price: live.price
+      price:    live.price
     };
   }
-  // Fallback to mock DB
   return mockStockDB[s] || null;
 }
 
 async function fetchLatestPrice(symbol, market) {
   const live = await yahooFetch(symbol, market);
   if (live) return live;
-  // Fallback: mock simulation if Yahoo fails
+  // Fallback: mock simulation
   const s = symbol.toUpperCase();
   const base = mockStockDB[s];
   if (!base) return null;
-  const change = (Math.random() - 0.48) * 0.015;
-  const newPrice = Math.round(base.price * (1 + change) * 100) / 100;
-  const prevClose = base.price;
-  return { price: newPrice, prevClose, change: newPrice - prevClose, changePct: change * 100 };
+  const chg = (Math.random() - 0.48) * 0.015;
+  const newPrice = Math.round(base.price * (1 + chg) * 100) / 100;
+  return { price: newPrice, prevClose: base.price, change: newPrice - base.price, changePct: chg * 100 };
 }
 
 // ─── Stock Calculations ──────────────────────────────────
